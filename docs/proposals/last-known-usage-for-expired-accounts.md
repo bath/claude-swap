@@ -87,14 +87,14 @@ each window at render time by comparing its `resets_at` to now.
   1: alice@example.com [Work]
      re-login needed — refresh token dead; log in with Claude Code, then run: cswap add
      ├ last known · 1d ago
-     ├ 5h:      —    rolled over since
+     ├ 5h:      —    window reset Sep 19 18:00
      ├ 7d:     40%   resets Sep 22 01:00  in 1d 2h
      └ Fable:  31%   resets Sep 22 01:00  in 1d 2h
 
   2: bob@example.com [Work]
      re-login needed — refresh token dead; log in with Claude Code, then run: cswap add
      ├ last known · 3d ago
-     ├ 5h:      —    rolled over since
+     ├ 5h:      —    window reset Sep 17 21:00
      ├ 7d:     99%   resets Sep 22 01:00  in 1d 2h
      └ Fable:  99%   resets Sep 22 01:00  in 1d 2h
 ```
@@ -104,12 +104,15 @@ Three per-window states:
 | State | Condition | Rendering |
 | --- | --- | --- |
 | Carried | `resets_at` in the future | measured percentage, plus countdown and clock recomputed by `fresh_reset_strings` |
-| Rolled | `resets_at` in the past | `—` and `rolled over since`; no percentage is asserted |
+| Rolled | `resets_at` in the past | `—` and `window reset <clock>`; no percentage is asserted |
 | Unknown | no `resets_at` stored | measured percentage, no reset column |
 
 The `last known · <age>` header carries the provenance once for the whole
 block, so no individual line has to repeat it, and the reader is never invited
 to mistake the block for a live reading.
+
+The rolled rendering is taken verbatim from #376's suggestion, so both paths
+produce one string from one classifier rather than two near-identical ones.
 
 Rolled windows deliberately print `—` rather than `0%`. Zero would be an
 assertion cswap cannot make: the operator may have used that account directly in
@@ -146,11 +149,53 @@ stay word-for-word identical. The same applies here:
   its age, so consumers can classify themselves. Worth confirming `resets_at`
   survives into the JSON payload unmodified rather than adding a derived field.
 
+## Relationship to existing issues
+
+**#376 (open) is the same rule on the healthy path.** It reports that a
+past-due reset on a live account renders as `in 0m`, because
+`oauth.format_reset` clamps the remaining seconds with `max(0, ...)`, and its
+first suggestion is exactly the rolled rendering proposed here:
+
+> When `resets_at` is in the past, the stored percentage is known to be
+> obsolete. Render it as unknown (for example `5h: —  window reset Sep 16
+> 17:40`) instead of the frozen percentage plus `in 0m`.
+
+The two reports arrive at the same rule from opposite directions. #376 reaches
+it from a 45-hour 429 freeze on an *active* account; this one reaches it from a
+dead refresh token on an *expired* account. The underlying fact is shared: a
+window whose reset instant has passed cannot still hold its measured
+percentage, whatever stopped the measurement from refreshing.
+
+So the classifier belongs in `oauth`, used by both paths. #376 also asks for
+the age note to mark the whole block rather than only the last row, which is
+what the `last known · <age>` header does here. Neither change blocks the
+other, and whichever lands first should expose the helper for the second.
+
+**#222 and #8 (both closed, completed) are the precedent.** Reset times were
+added to `cswap list` because "the information provided is too limited" for an
+exhausted account, and #8's requested rendering was simply "show it in the same
+way as usual". That is this proposal's argument applied to the healthy path.
+An expired account is the remaining case where the display still collapses, and
+the same answer fits it.
+
+**#180 (closed, completed) settled the polling half.** It established that an
+exhausted account should keep a measured state rather than aging into
+`unavailable`, on the grounds that routing should not drop a known-exhausted
+account as unknown. The display half of that argument is unfinished: an expired
+account still discards a measurement the store is holding.
+
+**Not related, despite surface similarity.** #165 and #254 concern recovering
+the credential itself, and #333 concerns where cswap looks for a token. This
+proposal changes nothing about authentication; it only renders what is already
+stored.
+
 ## Implementation sketch
 
 1. Add a window classifier in `oauth`, next to `fresh_reset_strings`, returning
    carried / rolled / unknown for a window dict and a reference time. Injecting
-   `now` keeps it testable without freezing the clock.
+   `now` keeps it testable without freezing the clock. This is the piece #376
+   also needs, so it should land as a shared helper rather than inside either
+   caller.
 2. Give `_format_usage_lines` a mode that renders rolled windows as `—`, so the
    sentinel branch and the normal branch share one formatter.
 3. Replace the sentinel branch's `last_seen_note` call with the header line plus
